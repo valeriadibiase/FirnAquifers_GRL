@@ -1,0 +1,414 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2759
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\deftab720
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs24 \cf0 //############################################################################ \
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardeftab720\pardirnatural\partightenfactor0
+\cf0 // Author: Sophie de Roda Husman (@sophiederoda; s.derodahusman@tudelft.nl)\
+//############################################################################\
+\
+//############################################################################\
+// This script computes the last day of melt based on ASCAT observations.\
+// Melt days are computed if the backscatter is lower than 3 dB compared to \
+// the previous winter season, a method proposed by Ashcraft and Long (2006).\
+// We used the ASCAT data to select the "end of a melt season". \
+\
+// In this study, melt periods need to encompass four consecutive observations, \
+// with at least  three out of the four observations indicating melt. Individual \
+// melt days are excluded, as a longer duration of melting is deemed necessary \
+// for aquifer formation. The last day of melt within the final selected melt \
+// period represents the "end of the melt season" \
+// ------------------------------------------------------------------------------\
+// Data information: \
+// Time period:         01 January 2015 - 31 December 2021\
+// Temporal resolution: 2x/day; Morning (M) and Evening (E) overpasses, \
+//                      6 AM and 6PM, respectively on alternate days. \
+//                      For this study, we only selected the Evening overpasses\
+// Spatial resolution:  4.45 km x 4.55 km \
+//############################################################################ \
+\
+//############################################################################\
+// General set-up\
+//############################################################################\
+\
+// Area of interest\
+var ROI = Peninsula\
+Map.centerObject(ROI, 5)\
+\
+// Thresholds\
+var threshold_s0_float = ee.Number(10).pow(ee.Number(-3).multiply(0.1))\
+\
+// Winter months\
+var winter_start = 6\
+var winter_end = 8\
+\
+// Total time period\
+var start = ee.Date('2015-01-01')\
+var end = ee.Date('2021-12-31') \
+\
+// Import modules\
+var palettes = require('users/gena/packages:palettes')\
+\
+//############################################################################\
+// Data collection setup\
+//############################################################################\
+\
+// Outlines\
+var IceShelf_Boundaries = ee.FeatureCollection("users/sophiederoda/IceShelf_Antarctica"), GroundingLine = ee.FeatureCollection("users/sophiederoda/GroundingLine_Antarctica"), AIS = /* color: #d63000 */ /* shown: false */ /* displayProperties: [ \{ "type": "rectangle" \} ] */ ee.Geometry.Polygon( [[[-179.999999999, -60], [-179.999999999, -89.999999999], [179.999999999, -89.999999999], [179.999999999, -60]]], null, false), Peninsula = /* color: #98ff00 */ /* shown: false */ /* displayProperties: [ \{ "type": "rectangle" \} ] */ ee.Geometry.Polygon( [[[-75.99473680954371, -63.37459766353361], [-75.99473680954371, -74.1057049293097], [-56.3072368095437, -74.1057049293097], [-56.3072368095437, -63.37459766353361]]], null, false), outline_AIS = ee.FeatureCollection("users/earthmapps/AntLandMask");\
+\
+// Elevation data\
+var DEM = ee.Image('CPOM/CryoSat2/ANTARCTICA_DEM').select('elevation');\
+\
+// Ice shelves outlines \
+var empty = ee.Image().byte();\
+var GL_outline = empty.paint(\{\
+  featureCollection: GroundingLine,\
+  color: 1,\
+  width: 2\
+\});\
+\
+// Load data collection\
+var ascat_col1 = ee.ImageCollection("users/aardmapp/Antarctica/ascat")\
+                .sort('system:time_start')\
+                .filterDate(start, end)\
+var ascat_col2 = ee.ImageCollection("users/sderodahusman2/ascat")\
+                .sort('system:time_start')\
+                .filterDate(start, end)\
+ \
+// Merge the collections into one image collection\
+var ascat_col = ascat_col1.merge(ascat_col2)\
+\
+// Only select evening observations\
+var ascat_col = ascat_col.filterMetadata('hour','equals',18)//.map(function(i)\{return i.rename(['ascat_n'])\});\
+\
+\
+//############################################################################\
+// Preprocess ASCAT data\
+//////////////////////////////////////////////////////////////////////////////\
+// 1) Clip outline\
+// 2) Obtain dB values from 8-bit images\
+// 3) Tranform dB to float values\
+//############################################################################\
+\
+/// Mask areas based on DEM\
+var ascat_col = ascat_col.map(function (img) \{\
+    var clipped = img.clip(outline_AIS).clip(ROI)\
+    return clipped\});\
+\
+// Add date field (format: YMD)\
+var ascat_col = ascat_col.map(function(i)\{\
+  return i.set('DateYMD',ee.Date(i.get('system:time_start')).format("yyyy-MM-dd-hh-mm"))\
+\})\
+\
+// Normalize the 8-bit images (from -32 to 0 dB) -> Formula: img*32/255 - 32\
+var ascat = ascat_col.map(function (img) \{\
+    var scaledImage = img.multiply(32.0/255.0).subtract(32);\
+    return scaledImage.double().copyProperties(img, ["system:time_start"]); \
+\});\
+\
+// Float from dB -> Formula: 10^(x*0.1)\
+var ascat = ascat.map(function (img) \{\
+    var ascat_db2float = ee.Image(10).pow(img.multiply(0.1))\
+    return ascat_db2float.copyProperties(img, ["system:time_start"]).copyProperties(img, ["DateYMD"]); \
+\});\
+\
+//############################################################################\
+// Compute melt (binary: no melt (0) / melt (1))\
+//############################################################################\
+\
+var ascat_2016_year = ascat.filterDate('2015-04-01', '2016-03-31')\
+var ascat_2017_year = ascat.filterDate('2016-04-01', '2017-03-31')\
+var ascat_2018_year = ascat.filterDate('2017-04-01', '2018-03-31')\
+var ascat_2019_year = ascat.filterDate('2018-04-01', '2019-03-31')\
+var ascat_2020_year = ascat.filterDate('2019-04-01', '2020-03-31')\
+var ascat_2021_year = ascat.filterDate('2020-04-01', '2021-03-31')\
+\
+var ascat_2016_winter = ascat_2016_year.filter(ee.Filter.calendarRange(winter_start,winter_end,'month')).mean();\
+var ascat_2017_winter = ascat_2017_year.filter(ee.Filter.calendarRange(winter_start,winter_end,'month')).mean();\
+var ascat_2018_winter = ascat_2018_year.filter(ee.Filter.calendarRange(winter_start,winter_end,'month')).mean();\
+var ascat_2019_winter = ascat_2019_year.filter(ee.Filter.calendarRange(winter_start,winter_end,'month')).mean();\
+var ascat_2020_winter = ascat_2020_year.filter(ee.Filter.calendarRange(winter_start,winter_end,'month')).mean();\
+var ascat_2021_winter = ascat_2021_year.filter(ee.Filter.calendarRange(winter_start,winter_end,'month')).mean();\
+\
+var ascat_2016_melt = ascat_2016_year.map(function(image)\{return image.addBands(image.lt(ascat_2016_winter.multiply(threshold_s0_float)).toFloat().rename('melt'))\}).select('melt')\
+var ascat_2017_melt = ascat_2017_year.map(function(image)\{return image.addBands(image.lt(ascat_2017_winter.multiply(threshold_s0_float)).toFloat().rename('melt'))\}).select('melt')\
+var ascat_2018_melt = ascat_2018_year.map(function(image)\{return image.addBands(image.lt(ascat_2018_winter.multiply(threshold_s0_float)).toFloat().rename('melt'))\}).select('melt')\
+var ascat_2019_melt = ascat_2019_year.map(function(image)\{return image.addBands(image.lt(ascat_2019_winter.multiply(threshold_s0_float)).toFloat().rename('melt'))\}).select('melt')\
+var ascat_2020_melt = ascat_2020_year.map(function(image)\{return image.addBands(image.lt(ascat_2020_winter.multiply(threshold_s0_float)).toFloat().rename('melt'))\}).select('melt')\
+var ascat_2021_melt = ascat_2021_year.map(function(image)\{return image.addBands(image.lt(ascat_2021_winter.multiply(threshold_s0_float)).toFloat().rename('melt'))\}).select('melt')\
+\
+var ascat_melt = ascat_2016_melt\
+                  .merge(ascat_2017_melt)\
+                  .merge(ascat_2018_melt)\
+                  .merge(ascat_2019_melt)\
+                  .merge(ascat_2020_melt)\
+                  .merge(ascat_2021_melt)\
+   \
+\
+// Add day of year (doy) as band to each ASCAT image\
+var addDate = function(image)\{\
+  var doy = image.date().getRelative('day', 'year');\
+  var doyBand = ee.Image.constant(doy).uint16().rename('doy')\
+  return image.addBands(doyBand)\}\
+  \
+\
+// select days between 1 January and 31 August\
+var ascat_2016_doy = ascat_melt.filterDate('2016-01-01', '2016-08-31').map(addDate)\
+var ascat_2017_doy = ascat_melt.filterDate('2017-01-01', '2017-08-31').map(addDate)\
+var ascat_2018_doy = ascat_melt.filterDate('2018-01-01', '2018-08-31').map(addDate)\
+var ascat_2019_doy = ascat_melt.filterDate('2019-01-01', '2019-08-31').map(addDate)\
+var ascat_2020_doy = ascat_melt.filterDate('2020-01-01', '2020-08-31').map(addDate)\
+var ascat_2021_doy = ascat_melt.filterDate('2021-01-01', '2021-08-31').map(addDate)\
+\
+//############################################################################\
+//Last days of consecutive melt\
+//############################################################################\
+\
+// We're only working with a single axis: #0\
+var axis = 0;\
+\
+// Computes the foward sum of three images \
+var forwardSum = function(image) \{\
+  var left = image.arraySlice(0, 0, -2)\
+  var right1 = image.arraySlice(0, 1, -1)\
+  var right2 = image.arraySlice(0, 2)\
+  return left.add(right1).add(right2)\
+\}\
+\
+//############################################################################\
+\
+// Convert to a 2D array-valued image and flatten to 1D using arrayReshape().\
+var ascat_2016_melt_array = ascat_2016_doy.select('melt').toArray()\
+var ascat_2016_melt_array = ascat_2016_melt_array.arrayReshape(ascat_2016_melt_array.arrayLength(0).toArray(), 1)\
+\
+var ascat_2017_melt_array = ascat_2017_doy.select('melt').toArray()\
+var ascat_2017_melt_array = ascat_2017_melt_array.arrayReshape(ascat_2017_melt_array.arrayLength(0).toArray(), 1)\
+\
+var ascat_2018_melt_array = ascat_2018_doy.select('melt').toArray()\
+var ascat_2018_melt_array = ascat_2018_melt_array.arrayReshape(ascat_2018_melt_array.arrayLength(0).toArray(), 1)\
+\
+var ascat_2019_melt_array = ascat_2019_doy.select('melt').toArray()\
+var ascat_2019_melt_array = ascat_2019_melt_array.arrayReshape(ascat_2019_melt_array.arrayLength(0).toArray(), 1)\
+\
+var ascat_2020_melt_array = ascat_2020_doy.select('melt').toArray()\
+var ascat_2020_melt_array = ascat_2020_melt_array.arrayReshape(ascat_2020_melt_array.arrayLength(0).toArray(), 1)\
+\
+var ascat_2021_melt_array = ascat_2021_doy.select('melt').toArray()\
+var ascat_2021_melt_array = ascat_2021_melt_array.arrayReshape(ascat_2021_melt_array.arrayLength(0).toArray(), 1)\
+\
+//############################################################################\
+\
+// Compute the forward sum of three consecutive days\
+var inf = ee.Image(ee.Array([999]))\
+\
+var ascat_2016_melt_sum = forwardSum(ascat_2016_melt_array);\
+var ascat_2016_melt_sum = inf.addBands(ascat_2016_melt_sum).toArray(0); \
+\
+var ascat_2017_melt_sum = forwardSum(ascat_2017_melt_array);\
+var ascat_2017_melt_sum = inf.addBands(ascat_2017_melt_sum).toArray(0); \
+\
+var ascat_2018_melt_sum = forwardSum(ascat_2018_melt_array);\
+var ascat_2018_melt_sum = inf.addBands(ascat_2018_melt_sum).toArray(0); \
+\
+var ascat_2019_melt_sum = forwardSum(ascat_2019_melt_array);\
+var ascat_2019_melt_sum = inf.addBands(ascat_2019_melt_sum).toArray(0); \
+\
+var ascat_2020_melt_sum =forwardSum(ascat_2020_melt_array);\
+var ascat_2020_melt_sum = inf.addBands(ascat_2020_melt_sum).toArray(0); \
+\
+var ascat_2021_melt_sum = forwardSum(ascat_2021_melt_array);\
+var ascat_2021_melt_sum = inf.addBands(ascat_2021_melt_sum).toArray(0); \
+\
+//############################################################################\
+\
+// Make an index array sized for the length of the data in each pixel.\
+var ascat_2016_melt_maxSize = ascat_2016_doy.size()\
+var ascat_2016_melt_indexes = ee.Image.constant(ee.Array(ee.List.sequence(0, ascat_2016_melt_maxSize)));\
+var ascat_2016_melt_indexes = ascat_2016_melt_indexes.arraySlice(axis, 0, ascat_2016_melt_array.arrayLength(0)).arraySlice(0, 0, -1);\
+\
+var ascat_2017_melt_maxSize = ascat_2017_doy.size()\
+var ascat_2017_melt_indexes = ee.Image.constant(ee.Array(ee.List.sequence(0, ascat_2017_melt_maxSize)));\
+var ascat_2017_melt_indexes = ascat_2017_melt_indexes.arraySlice(axis, 0, ascat_2017_melt_array.arrayLength(0)).arraySlice(0, 0, -1);\
+\
+var ascat_2018_melt_maxSize = ascat_2018_doy.size()\
+var ascat_2018_melt_indexes = ee.Image.constant(ee.Array(ee.List.sequence(0, ascat_2018_melt_maxSize)));\
+var ascat_2018_melt_indexes = ascat_2018_melt_indexes.arraySlice(axis, 0, ascat_2018_melt_array.arrayLength(0)).arraySlice(0, 0, -1);\
+\
+var ascat_2019_melt_maxSize = ascat_2019_doy.size()\
+var ascat_2019_melt_indexes = ee.Image.constant(ee.Array(ee.List.sequence(0, ascat_2019_melt_maxSize)));\
+var ascat_2019_melt_indexes = ascat_2019_melt_indexes.arraySlice(axis, 0, ascat_2019_melt_array.arrayLength(0)).arraySlice(0, 0, -1);\
+\
+var ascat_2020_melt_maxSize = ascat_2020_doy.size()\
+var ascat_2020_melt_indexes = ee.Image.constant(ee.Array(ee.List.sequence(0, ascat_2020_melt_maxSize)));\
+var ascat_2020_melt_indexes = ascat_2020_melt_indexes.arraySlice(axis, 0, ascat_2020_melt_array.arrayLength(0)).arraySlice(0, 0, -1);\
+\
+var ascat_2021_melt_maxSize = ascat_2021_doy.size()\
+var ascat_2021_melt_indexes = ee.Image.constant(ee.Array(ee.List.sequence(0, ascat_2021_melt_maxSize)));\
+var ascat_2021_melt_indexes = ascat_2021_melt_indexes.arraySlice(axis, 0, ascat_2021_melt_array.arrayLength(0)).arraySlice(0, 0, -1);\
+\
+//############################################################################\
+\
+// Mask melt events shorter than three consecutive observations\
+var ascat_2016_melt_maskShortEvents = ascat_2016_melt_indexes.arrayMask(ascat_2016_melt_sum.gt(1))\
+var ascat_2017_melt_maskShortEvents = ascat_2017_melt_indexes.arrayMask(ascat_2017_melt_sum.gt(1))\
+var ascat_2018_melt_maskShortEvents = ascat_2018_melt_indexes.arrayMask(ascat_2018_melt_sum.gt(1))\
+var ascat_2019_melt_maskShortEvents = ascat_2019_melt_indexes.arrayMask(ascat_2019_melt_sum.gt(1))\
+var ascat_2020_melt_maskShortEvents = ascat_2020_melt_indexes.arrayMask(ascat_2020_melt_sum.gt(1))\
+var ascat_2021_melt_maskShortEvents = ascat_2021_melt_indexes.arrayMask(ascat_2021_melt_sum.gt(1))\
+\
+// Select last consecutive melt period, and add three days (to get final date of period)\
+var ascat_2016_melt_maxIndex = ascat_2016_melt_maskShortEvents.arrayGet(-1)\
+var ascat_2016_doy_array = ascat_2016_doy.select('doy').toArray()\
+var ascat_2016_doy_array = ascat_2016_doy_array.arrayReshape(ascat_2016_doy_array.arrayLength(0).toArray(), 1)\
+var ascat_2016_melt_final = ascat_2016_doy_array.arrayGet(ascat_2016_melt_maxIndex.toInt()).add(1)\
+var ascat_2016_melt_final = ascat_2016_melt_final.mask(ascat_2016_melt_final.gt(5))\
+\
+var ascat_2017_melt_maxIndex = ascat_2017_melt_maskShortEvents.arrayGet(-1)\
+var ascat_2017_doy_array = ascat_2017_doy.select('doy').toArray()\
+var ascat_2017_doy_array = ascat_2017_doy_array.arrayReshape(ascat_2017_doy_array.arrayLength(0).toArray(), 1)\
+var ascat_2017_melt_final = ascat_2017_doy_array.arrayGet(ascat_2017_melt_maxIndex.toInt()).add(1)\
+var ascat_2017_melt_final = ascat_2017_melt_final.mask(ascat_2017_melt_final.gt(5))\
+\
+var ascat_2018_melt_maxIndex = ascat_2018_melt_maskShortEvents.arrayGet(-1)\
+var ascat_2018_doy_array = ascat_2018_doy.select('doy').toArray()\
+var ascat_2018_doy_array = ascat_2018_doy_array.arrayReshape(ascat_2018_doy_array.arrayLength(0).toArray(), 1)\
+var ascat_2018_melt_final = ascat_2018_doy_array.arrayGet(ascat_2018_melt_maxIndex.toInt()).add(1)\
+var ascat_2018_melt_final = ascat_2018_melt_final.mask(ascat_2018_melt_final.gt(5))\
+\
+var ascat_2019_melt_maxIndex = ascat_2019_melt_maskShortEvents.arrayGet(-1)\
+var ascat_2019_doy_array = ascat_2019_doy.select('doy').toArray()\
+var ascat_2019_doy_array = ascat_2019_doy_array.arrayReshape(ascat_2019_doy_array.arrayLength(0).toArray(), 1)\
+var ascat_2019_melt_final = ascat_2019_doy_array.arrayGet(ascat_2019_melt_maxIndex.toInt()).add(1)\
+var ascat_2019_melt_final = ascat_2019_melt_final.mask(ascat_2019_melt_final.gt(5))\
+\
+var ascat_2020_melt_maxIndex = ascat_2020_melt_maskShortEvents.arrayGet(-1)\
+var ascat_2020_doy_array = ascat_2020_doy.select('doy').toArray()\
+var ascat_2020_doy_array = ascat_2020_doy_array.arrayReshape(ascat_2020_doy_array.arrayLength(0).toArray(), 1)\
+var ascat_2020_melt_final = ascat_2020_doy_array.arrayGet(ascat_2020_melt_maxIndex.toInt()).add(1)\
+var ascat_2020_melt_final = ascat_2020_melt_final.mask(ascat_2020_melt_final.gt(5))\
+\
+var ascat_2021_melt_maxIndex = ascat_2021_melt_maskShortEvents.arrayGet(-1)\
+var ascat_2021_doy_array = ascat_2021_doy.select('doy').toArray()\
+var ascat_2021_doy_array = ascat_2021_doy_array.arrayReshape(ascat_2021_doy_array.arrayLength(0).toArray(), 1)\
+var ascat_2021_melt_final = ascat_2021_doy_array.arrayGet(ascat_2021_melt_maxIndex.toInt()).add(1)\
+var ascat_2021_melt_final = ascat_2021_melt_final.mask(ascat_2021_melt_final.gt(5))\
+\
+\
+//############################################################################\
+// Visualize layers\
+//############################################################################\
+\
+var vis = \{'min':0, 'max':100, 'palette':palettes.colorbrewer.YlOrBr[9]\} \
+\
+// Set satellite image as background\
+Map.setOptions('SATELLITE')\
+  \
+// Visualize last day of melt per year\
+Map.addLayer(ascat_2016_melt_final.clip(ROI), vis, 'Last day of melt (2016)',1)\
+Map.addLayer(ascat_2017_melt_final.clip(ROI), vis, 'Last day of melt (2017)',1)\
+Map.addLayer(ascat_2018_melt_final.clip(ROI), vis, 'Last day of melt (2018)',1)\
+Map.addLayer(ascat_2019_melt_final.clip(ROI), vis, 'Last day of melt (2019)',1)\
+Map.addLayer(ascat_2020_melt_final.clip(ROI), vis, 'Last day of melt (2020)',1)\
+\
+// Visualize grounding line\
+Map.addLayer(GL_outline, \{\}, 'Grounding Line')\
+\
+\
+//############################################################################\
+// Add legend\
+//############################################################################\
+\
+function makeColorBarParams(palette) \{\
+  return \{\
+    bbox: [0, 0, 1, 0.1],\
+    dimensions: '100x10',\
+    format: 'png',\
+    min: 0,\
+    max: 1,\
+    palette: palette,\
+  \};\
+\}\
+\
+// Create the color bar for the legend.\
+var colorBar = ui.Thumbnail(\{\
+  image: ee.Image.pixelLonLat().select(0),\
+  params: makeColorBarParams(vis.palette),\
+  style: \{stretch: 'horizontal', margin: '0px 8px', maxHeight: '24px'\},\
+\});\
+\
+// Create a panel with three numbers for the legend.\
+var legendLabels = ui.Panel(\{\
+  widgets: [\
+    ui.Label(vis.min, \{margin: '4px 8px'\}),\
+    ui.Label(\
+        ((vis.max-vis.min) / 2+vis.min),\
+        \{margin: '4px 8px', textAlign: 'center', stretch: 'horizontal'\}),\
+    ui.Label(vis.max, \{margin: '4px 8px'\})\
+  ],\
+  layout: ui.Panel.Layout.flow('horizontal')\
+\});\
+\
+var legendTitle = ui.Label(\{\
+  value: 'Last day of melt (doy)',\
+  style: \{fontWeight: 'bold'\}\
+\});\
+\
+// Add the legendPanel to the map.\
+var legendPanel = ui.Panel([legendTitle, colorBar, legendLabels]);\
+Map.add(legendPanel);\
+\
+//############################################################################\
+// Export last day of melt pixels to Google Drive\
+//############################################################################\
+ \
+Export.image.toDrive(\{\
+  image: ascat_2016_melt_final,\
+  description: 'ASCAT_lastdayofmelt_2016',\
+  folder: 'Test_Folder',\
+  scale: 4450,\
+  maxPixels: 1e9,\
+  region: ROI,\
+  crs: 'epsg:3031'\});\
+\
+Export.image.toDrive(\{\
+  image: ascat_2017_melt_final,\
+  description: 'ASCAT_lastdayofmelt_2017',\
+  folder: 'Test_Folder',\
+  scale: 4450,\
+  maxPixels: 1e9,\
+  region: ROI,\
+  crs: 'epsg:3031'\});\
+\
+Export.image.toDrive(\{\
+  image: ascat_2018_melt_final,\
+  description: 'ASCAT_lastdayofmelt_2018',\
+  folder: 'Test_Folder',\
+  scale: 4450,\
+  maxPixels: 1e9,\
+  region: ROI,\
+  crs: 'epsg:3031'\});\
+\
+Export.image.toDrive(\{\
+  image: ascat_2019_melt_final,\
+  description: 'ASCAT_lastdayofmelt_2019',\
+  folder: 'Test_Folder',\
+  scale: 4450,\
+  maxPixels: 1e9,\
+  region: ROI,\
+  crs: 'epsg:3031'\});\
+\
+Export.image.toDrive(\{\
+  image: ascat_2020_melt_final,\
+  description: 'ASCAT_lastdayofmelt_2020',\
+  folder: 'Test_Folder',\
+  scale: 4450,\
+  maxPixels: 1e9,\
+  region: ROI,\
+  crs: 'epsg:3031'\});\
+\
+\
+}
